@@ -1,0 +1,125 @@
+name: 'Build Windows'
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: 'App name'
+        required: true
+        type: string
+      version:
+        description: 'App version'
+        required: true
+        type: string
+    outputs:
+      artifacts:
+        description: 'List of generated artifacts'
+        value: ${{ jobs.build.outputs.artifacts }}
+      status:
+        description: 'Build status'
+        value: ${{ jobs.build.outputs.status }}
+
+jobs:
+  build:
+    name: 'Windows Build'
+    environment: production
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    outputs:
+      artifacts: ${{ steps.build.outputs.artifacts }}
+      status: ${{ steps.build.outputs.status }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'x86_64-pc-windows-msvc'
+            arch: 'x64'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: windows-rust-${{ runner.os }}-${{ matrix.target }}-v1
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build Windows app
+        id: build
+        run: |
+          echo " Building Windows app..."
+          pnpm tauri build --target ${{ matrix.target }}
+          
+          # Find generated artifacts
+          echo " Locating artifacts..."
+          MSI_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/msi -name "*.msi" 2>/dev/null || echo "")
+          NSIS_FILES=$(find src-tauri/target/${{ matrix.target }}/release/bundle/nsis -name "*-setup.exe" 2>/dev/null || echo "")
+          
+          # Create artifacts list
+          ARTIFACTS=""
+          if [ -n "$MSI_FILES" ]; then
+            ARTIFACTS="$ARTIFACTS $MSI_FILES"
+          fi
+          if [ -n "$NSIS_FILES" ]; then
+            ARTIFACTS="$ARTIFACTS $NSIS_FILES"
+          fi
+          
+          echo "artifacts=$ARTIFACTS" >> $GITHUB_OUTPUT
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+          echo " Build completed successfully"
+          echo " Artifacts: $ARTIFACTS"
+        shell: bash
+
+      - name: Upload Windows artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}-artifacts
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## Windows Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** ${{ matrix.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Architecture:** ${{ matrix.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.build.outputs.status || 'failed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.build.outputs.status }}" = "success" ]; then
+            echo "###  Generated Artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.msi" -o -name "*-setup.exe" | head -10 >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo " Build failed" >> $GITHUB_STEP_SUMMARY
+          fi
+        shell: bash
